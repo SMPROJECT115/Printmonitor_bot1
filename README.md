@@ -19,6 +19,7 @@ El bot descarga los archivos de `updates/` y los aplica en `C:\PrintMonitor`.
 | `reporte_fecha_enable_update.py` | Habilita `/reporte` pidiendo fecha `YYYY-MM-DD` (ej: `2026-05-21`) |
 | `report_timezone_mexico_update.py` | (V1) Fuerza America/Mexico_City en reportes PDF |
 | `fix_incorrect_timezone_update.py` | **(V2.1) Fix Incorrect Time Zone** — compatible con pythonw / Python 3.x — corrige zona horaria en PDF, bot `/estado`, env y Windows |
+| `ui_report_professional_v3_update.py` | UI profesional v3: captions y mensajes limpios sin cajas pesadas |
 
 ## Fix Incorrect Time Zone (V2)
 
