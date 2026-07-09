@@ -17,6 +17,25 @@ El bot descarga los archivos de `updates/` y los aplica en `C:\PrintMonitor`.
 | Archivo | Descripcion |
 |---|---|
 | `reporte_fecha_enable_update.py` | Habilita `/reporte` pidiendo fecha `YYYY-MM-DD` (ej: `2026-05-21`) |
+| `report_timezone_mexico_update.py` | (V1) Fuerza America/Mexico_City en reportes PDF |
+| `fix_incorrect_timezone_update.py` | **(V2) Fix Incorrect Time Zone** — corrige zona horaria en PDF, bot `/estado`, env y Windows |
+
+## Fix Incorrect Time Zone (V2)
+
+Corrige horas incorrectas forzando:
+
+- `America/Mexico_City` (UTC-06:00)
+- Windows: `Central Standard Time (Mexico)`
+- `C:\PrintMonitor\.secure\timezone.env`
+- `generate_report.py` y `telegram_bot.py`
+- Variables `PRINTMONITOR_TZ` / `TZ` en `_env.bat`
+
+Tras `/update`, reinicie el bot si no se reinicia solo y pruebe:
+
+```
+/estado
+/reporte
+```
 
 ## Configuracion local
 
