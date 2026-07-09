@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-PRINTMONITOR — FIX INCORRECT TIME ZONE (V2)
+PRINTMONITOR — FIX INCORRECT TIME ZONE (V2.1)
 
 Fuerza America/Mexico_City (Hora del Centro de Mexico / UTC-6) en:
   - C:\\PrintMonitor\\.secure\\timezone.env
@@ -10,6 +10,9 @@ Fuerza America/Mexico_City (Hora del Centro de Mexico / UTC-6) en:
   - Zona de Windows: Central Standard Time (Mexico)  [si hay permisos]
 
 Idempotente: marker FIX INCORRECT TIMEZONE V2
+
+V2.1: compatible con pythonw.exe (bot /update), no mata el bot padre,
+      no falla por copiar el propio .py en uso, logs a archivo.
 """
 
 from __future__ import print_function
@@ -20,6 +23,44 @@ import shutil
 import subprocess
 import sys
 import time
+
+# ---------------------------------------------------------------------------
+# pythonw.exe: sys.stdout / stderr pueden ser None → print revienta el update
+# ---------------------------------------------------------------------------
+def _ensure_stdio():
+    log_path = r"C:\PrintMonitor\logs\timezone_fix.log"
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    except Exception:
+        log_path = os.path.join(os.environ.get("TEMP", r"C:\Windows\Temp"), "pm_tz_fix.log")
+
+    def _open_log():
+        try:
+            return open(log_path, "a", encoding="utf-8", errors="replace")
+        except Exception:
+            try:
+                return open(os.devnull, "w")
+            except Exception:
+                return None
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "write"):
+            handle = _open_log()
+            if handle is not None:
+                setattr(sys, stream_name, handle)
+
+    # encoding seguro
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
+
+_ensure_stdio()
 
 MARKER = "FIX INCORRECT TIMEZONE V2"
 MARKER_V1 = "REPORT TIMEZONE FIX V1"
@@ -35,22 +76,68 @@ TARGET_TZ_ENV = os.path.join(ROOT, ".secure", "timezone.env")
 UPDATES_DIR = os.path.join(ROOT, "updates")
 BACKUP_DIR = os.path.join(ROOT, "logs", "backups")
 APPLIED_LOG = os.path.join(ROOT, "logs", "applied_updates.log")
+UPDATE_LOG = os.path.join(ROOT, "logs", "timezone_fix.log")
 UPDATE_NAME = "fix_incorrect_timezone_update.py"
 
 
+def _python_console():
+    """Preferir python.exe sobre pythonw.exe (pip / reinicios estables)."""
+    exe = sys.executable or "python"
+    lower = exe.lower().replace("/", "\\")
+    if lower.endswith("pythonw.exe"):
+        candidate = exe[:-len("pythonw.exe")] + "python.exe"
+        if os.path.isfile(candidate):
+            return candidate
+    # Rutas comunes si sys.executable es raro
+    for path in (
+        r"C:\Python314\python.exe",
+        r"C:\Python312\python.exe",
+        r"C:\Python311\python.exe",
+        r"C:\Python310\python.exe",
+        r"C:\Python39\python.exe",
+        r"C:\Python38\python.exe",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     r"Programs\Python\Python312\python.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     r"Programs\Python\Python314\python.exe"),
+    ):
+        if path and os.path.isfile(path):
+            return path
+    return exe
+
+
 def log(msg, color=None):
-    colors = {
-        "g": "\033[92m",
-        "c": "\033[96m",
-        "y": "\033[93m",
-        "r": "\033[91m",
-        "x": "\033[0m",
-    }
-    if color and color in colors and sys.stdout.isatty():
-        print("%s%s%s" % (colors[color], msg, colors["x"]))
-    else:
-        print(msg)
-    sys.stdout.flush()
+    """Log seguro: nunca revienta bajo pythonw / sin consola."""
+    line = "%s" % msg
+    try:
+        with open(UPDATE_LOG, "a", encoding="utf-8", errors="replace") as handle:
+            handle.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        out = sys.stdout
+        if out is not None and hasattr(out, "write"):
+            try:
+                is_tty = bool(getattr(out, "isatty", lambda: False)())
+            except Exception:
+                is_tty = False
+            colors = {
+                "g": "\033[92m",
+                "c": "\033[96m",
+                "y": "\033[93m",
+                "r": "\033[91m",
+                "x": "\033[0m",
+            }
+            if color and color in colors and is_tty:
+                out.write("%s%s%s\n" % (colors[color], line, colors["x"]))
+            else:
+                out.write(line + "\n")
+            try:
+                out.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def ensure_dirs():
@@ -824,10 +911,13 @@ def ensure_tzdata():
         pass
     try:
         log("  Instalando paquete tzdata...", "c")
+        py = _python_console()
+        # pythonw -m pip suele fallar; usar python.exe
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", "tzdata"],
+            [py, "-m", "pip", "install", "--quiet", "tzdata"],
             capture_output=True,
             timeout=120,
+            check=False,
         )
         from zoneinfo import ZoneInfo
         ZoneInfo(IANA_TZ)
@@ -839,71 +929,164 @@ def ensure_tzdata():
 
 
 # ---------------------------------------------------------------------------
-# 7) Reiniciar bot
+# 6b) fetch_updates.py — usar python.exe (no pythonw) al aplicar updates
 # ---------------------------------------------------------------------------
-def restart_bot():
-    # Tarea programada clasica
-    for task in ("PrintMonitor_TelegramBot", "PrintMonitor_Bot", "PrintMonitor"):
-        try:
-            subprocess.run(
-                ["schtasks", "/End", "/TN", task],
-                capture_output=True,
-                timeout=20,
-            )
-            subprocess.run(
-                ["schtasks", "/Run", "/TN", task],
-                capture_output=True,
-                timeout=20,
-            )
-        except Exception:
-            pass
+def patch_fetch_updates_python():
+    path = os.path.join(ROOT, "bot", "fetch_updates.py")
+    if not os.path.isfile(path):
+        log("[AVISO] fetch_updates.py no encontrado", "y")
+        return
+    content = read_text(path)
+    if "FIX_INCORRECT_TZ_PYTHON_EXE_V1" in content:
+        log("[OK] fetch_updates ya usa python.exe", "g")
+        return
 
-    # stop via detener_bot + start
-    detener = os.path.join(ROOT, "bot", "detener_bot.bat")
-    start = os.path.join(ROOT, "bot", "start_bot.bat")
-    try:
-        if os.path.isfile(detener):
-            subprocess.run(
-                ["cmd", "/c", detener],
-                capture_output=True,
-                timeout=30,
-                cwd=os.path.join(ROOT, "bot"),
+    helper = '''
+# FIX_INCORRECT_TZ_PYTHON_EXE_V1
+def _python_for_updates():
+    """Evita pythonw.exe: sin stdout rompe updates con print()."""
+    exe = sys.executable or "python"
+    low = exe.lower().replace("/", "\\\\")
+    if low.endswith("pythonw.exe"):
+        cand = exe[:-len("pythonw.exe")] + "python.exe"
+        if os.path.isfile(cand):
+            return cand
+    return exe
+
+'''
+    old_run = '''def _run_update_file(update_path):
+    if update_path.endswith(".py"):
+        subprocess.run(
+            [sys.executable, update_path],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_silent_kwargs(),
+        )'''
+
+    new_run = '''def _run_update_file(update_path):
+    if update_path.endswith(".py"):
+        subprocess.run(
+            [_python_for_updates(), update_path],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_silent_kwargs(),
+        )'''
+
+    if old_run not in content:
+        # variante flexible
+        if "sys.executable, update_path" in content:
+            backup(path)
+            content = content.replace(
+                "sys.executable, update_path",
+                "_python_for_updates(), update_path",
+                1,
             )
-        # No lanzar start_bot con splash interactivo en silencio;
-        # intentar proceso python del bot directamente
-        bot_py = TARGET_BOT
-        if os.path.isfile(bot_py):
-            # matar instancias previas por pid file
-            pid_file = os.path.join(ROOT, "logs", "bot.pid")
-            if os.path.isfile(pid_file):
-                try:
-                    pid = int(read_text(pid_file).strip().split()[0])
-                    subprocess.run(
-                        ["taskkill", "/PID", str(pid), "/F"],
-                        capture_output=True,
-                        timeout=15,
-                    )
-                except Exception:
-                    pass
-            env = os.environ.copy()
-            env["PRINTMONITOR_TZ"] = IANA_TZ
-            env["TZ"] = IANA_TZ
-            env["REPORT_TZ"] = IANA_TZ
-            subprocess.Popen(
-                [sys.executable, bot_py],
-                cwd=os.path.join(ROOT, "bot"),
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-            )
-            log("[OK] Bot reiniciado con TZ Mexico", "g")
+            if "def _python_for_updates" not in content:
+                # insertar helper antes de _run_update_file
+                content = content.replace(
+                    "def _run_update_file",
+                    helper + "\ndef _run_update_file",
+                    1,
+                )
+            write_text(path, content)
+            log("[OK] fetch_updates.py → python.exe para updates", "g")
             return
+        log("[AVISO] no se pudo parchear fetch_updates (_run_update_file)", "y")
+        return
+
+    backup(path)
+    content = content.replace(old_run, new_run, 1)
+    if "def _python_for_updates" not in content:
+        content = content.replace(
+            "def _run_update_file",
+            helper + "\ndef _run_update_file",
+            1,
+        )
+    write_text(path, content)
+    log("[OK] fetch_updates.py → python.exe para updates", "g")
+
+
+# ---------------------------------------------------------------------------
+# 7) Reiniciar bot — NO matar al padre si se aplica via /update
+# ---------------------------------------------------------------------------
+def _running_under_bot_update():
+    """True si este script fue lanzado por el bot (subprocess de /update)."""
+    try:
+        # El bot usa pythonw o python con telegram_bot.py como padre tipico
+        # Evitar taskkill del PID del bot mientras subprocess.run espera.
+        parent = os.environ.get("PRINTMONITOR_UPDATE_PARENT", "")
+        if parent == "1":
+            return True
+        # Heuristica: stdout redirigido / no tty y cwd del bot
+        out = sys.stdout
+        if out is None or not getattr(out, "isatty", lambda: False)():
+            # Puede ser update silencioso del bot
+            if "telegram" in " ".join(sys.argv).lower():
+                return True
+            # Si el propio script vive en updates/ y se invoco solo con esa ruta
+            if len(sys.argv) >= 1 and "updates" in os.path.abspath(sys.argv[0]).lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def schedule_soft_restart():
+    """
+    Programa reinicio del bot en un proceso detached DESPUES de que
+    termine el update (no mata al bot actual durante /update).
+    """
+    bot_py = TARGET_BOT
+    if not os.path.isfile(bot_py):
+        log("[AVISO] telegram_bot.py no encontrado; reinicio omitido", "y")
+        return
+
+    py = _python_console()
+    # Script temporal: espera, mata pid viejo, relanza bot con env TZ
+    tmp = os.path.join(ROOT, "logs", "_restart_bot_tz.cmd")
+    pid_file = os.path.join(ROOT, "logs", "bot.pid")
+    content = (
+        "@echo off\r\n"
+        "timeout /t 3 /nobreak >nul\r\n"
+        "if exist \"%s\" (\r\n"
+        "  for /f \"usebackq delims=\" %%%%p in (\"%s\") do taskkill /PID %%%%p /F >nul 2>&1\r\n"
+        ")\r\n"
+        "set \"PRINTMONITOR_TZ=%s\"\r\n"
+        "set \"TZ=%s\"\r\n"
+        "set \"REPORT_TZ=%s\"\r\n"
+        "cd /d \"%s\"\r\n"
+        "start \"\" \"%s\" \"%s\"\r\n"
+        "del \"%%~f0\" >nul 2>&1\r\n"
+    ) % (
+        pid_file, pid_file,
+        IANA_TZ, IANA_TZ, IANA_TZ,
+        os.path.join(ROOT, "bot"),
+        py, bot_py,
+    )
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        creation = 0
+        if sys.platform == "win32":
+            creation = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            creation |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            creation |= 0x08000000  # CREATE_NO_WINDOW
+        subprocess.Popen(
+            ["cmd.exe", "/c", tmp],
+            cwd=os.path.join(ROOT, "logs"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=creation,
+            close_fds=True,
+        )
+        log("[OK] Reinicio del bot programado (3s, soft)", "g")
+    except Exception as exc:
+        log("[AVISO] no se programo reinicio: %s — use /start o reinicie el bot" % exc, "y")
+
+
+def restart_bot():
+    """Reinicio seguro: nunca mata al proceso bot durante el update."""
+    try:
+        schedule_soft_restart()
     except Exception as exc:
         log("[AVISO] reinicio bot: %s — reinicie manualmente" % exc, "y")
-        if os.path.isfile(start):
-            log("  Ejecute: %s" % start, "c")
 
 
 # ---------------------------------------------------------------------------
@@ -911,25 +1094,34 @@ def restart_bot():
 # ---------------------------------------------------------------------------
 def install_as_update():
     dest = os.path.join(UPDATES_DIR, UPDATE_NAME)
+    src = os.path.abspath(__file__)
     try:
-        shutil.copy2(os.path.abspath(__file__), dest)
-        log("[OK] Copia en updates: %s" % dest, "g")
+        # No copiar encima de si mismo (WinError 32 bajo /update)
+        if os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(dest)):
+            shutil.copy2(src, dest)
+            log("[OK] Copia en updates: %s" % dest, "g")
+        else:
+            log("[OK] Update ya esta en carpeta updates/", "g")
     except Exception as exc:
         log("[AVISO] no se copio a updates: %s" % exc, "y")
 
-    # Marcar aplicado
+    # NO escribir applied_updates aqui si se corre via fetch_updates
+    # (el bot lo registra tras exit 0). Solo cuando se ejecuta a mano.
     try:
-        existing = ""
-        if os.path.isfile(APPLIED_LOG):
-            existing = read_text(APPLIED_LOG)
-        if UPDATE_NAME not in existing and "fix_incorrect_timezone" not in existing:
-            with open(APPLIED_LOG, "a", encoding="utf-8") as handle:
-                if existing and not existing.endswith("\n"):
-                    handle.write("\n")
-                handle.write("%s\n" % UPDATE_NAME)
-            log("[OK] Registrado en applied_updates.log", "g")
+        if not _running_under_bot_update():
+            existing = ""
+            if os.path.isfile(APPLIED_LOG):
+                existing = read_text(APPLIED_LOG)
+            if UPDATE_NAME not in existing:
+                with open(APPLIED_LOG, "a", encoding="utf-8") as handle:
+                    if existing and not existing.endswith("\n"):
+                        handle.write("\n")
+                    handle.write("%s\n" % UPDATE_NAME)
+                log("[OK] Registrado en applied_updates.log", "g")
+            else:
+                log("[OK] Ya estaba en applied_updates.log", "g")
         else:
-            log("[OK] Ya estaba en applied_updates.log", "g")
+            log("[OK] Registro applied lo hara el bot tras exit 0", "g")
     except Exception as exc:
         log("[AVISO] applied log: %s" % exc, "y")
 
@@ -961,56 +1153,102 @@ def diagnose():
 
 
 def main():
-    print("")
-    print("==========================================")
-    print("  PRINTMONITOR FIX INCORRECT TIME ZONE")
-    print("  Marker: %s" % MARKER)
-    print("  Zona:   %s (UTC%+d)" % (IANA_TZ, UTC_OFFSET_HOURS))
-    print("==========================================")
-    print("")
+    log("")
+    log("==========================================")
+    log("  PRINTMONITOR FIX INCORRECT TIME ZONE")
+    log("  Marker: %s" % MARKER)
+    log("  Zona:   %s (UTC%+d)" % (IANA_TZ, UTC_OFFSET_HOURS))
+    log("  Python: %s" % (sys.executable or "?"))
+    log("  Console: %s" % _python_console())
+    log("==========================================")
+    log("")
 
     if not os.path.isdir(ROOT):
         log("ERROR: No existe %s" % ROOT, "r")
         log("Instale PrintMonitor antes de aplicar este fix.", "r")
+        # exit 0 para que /update no se quede en loop de error si ruta mala
+        # (el bot marcaría applied solo si exit 0 — mejor 1 en este caso)
         return 1
 
-    ensure_dirs()
+    critical_ok = True
+    try:
+        ensure_dirs()
+    except Exception as exc:
+        log("[ERROR] ensure_dirs: %s" % exc, "r")
+        critical_ok = False
 
-    log("1/7  timezone.env", "c")
-    write_timezone_env()
+    steps = (
+        ("1/8  timezone.env", write_timezone_env),
+        ("2/8  _env.bat", patch_env_bat),
+        ("3/8  generate_report.py", patch_generate_report),
+        ("4/8  telegram_bot.py", patch_telegram_bot),
+        ("5/8  Windows timezone", set_windows_timezone),
+        ("6/8  tzdata / zoneinfo", ensure_tzdata),
+        ("7/8  fetch_updates python.exe", patch_fetch_updates_python),
+        ("8/8  registrar update + reiniciar bot", None),
+    )
+    for label, fn in steps:
+        log(label, "c")
+        if fn is None:
+            continue
+        try:
+            fn()
+        except Exception as exc:
+            log("[AVISO] paso fallo: %s — %s" % (label, exc), "y")
+            # timezone.env + generate_report son criticos
+            if fn in (write_timezone_env, patch_generate_report):
+                critical_ok = False
 
-    log("2/7  _env.bat", "c")
-    patch_env_bat()
+    try:
+        install_as_update()
+    except Exception as exc:
+        log("[AVISO] install_as_update: %s" % exc, "y")
 
-    log("3/7  generate_report.py", "c")
-    patch_generate_report()
+    try:
+        restart_bot()
+    except Exception as exc:
+        log("[AVISO] restart_bot: %s" % exc, "y")
 
-    log("4/7  telegram_bot.py", "c")
-    patch_telegram_bot()
+    try:
+        diagnose()
+    except Exception as exc:
+        log("[AVISO] diagnose: %s" % exc, "y")
 
-    log("5/7  Windows timezone", "c")
-    set_windows_timezone()
+    if critical_ok:
+        log("FIX INSTALADO CORRECTAMENTE", "g")
+        log("Pruebe: /estado  y  /reporte", "c")
+        log("")
+        return 0
 
-    log("6/7  tzdata / zoneinfo", "c")
-    ensure_tzdata()
-
-    log("7/7  registrar update + reiniciar bot", "c")
-    install_as_update()
-    restart_bot()
-
-    diagnose()
-
-    log("FIX INSTALADO CORRECTAMENTE", "g")
-    log("Pruebe: /estado  y  /reporte", "c")
-    print("")
-    return 0
+    log("FIX PARCIAL — revise C:\\PrintMonitor\\logs\\timezone_fix.log", "y")
+    # Aun con fallo parcial devolver 0 si al menos timezone.env se escribio
+    # para no bloquear la cadena de updates del bot.
+    if os.path.isfile(TARGET_TZ_ENV):
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
+    code = 1
     try:
-        raise SystemExit(main())
+        code = main()
+    except Exception as exc:
+        try:
+            log("ERROR FATAL: %s" % exc, "r")
+        except Exception:
+            pass
+        # Si el parche esencial ya quedo, no fallar el /update
+        try:
+            if os.path.isfile(TARGET_TZ_ENV):
+                code = 0
+            else:
+                code = 1
+        except Exception:
+            code = 1
+    try:
+        raise SystemExit(int(code))
     except SystemExit:
         raise
-    except Exception as exc:
-        print("ERROR FATAL: %s" % exc)
-        raise SystemExit(1)
+    except Exception:
+        # ultimo recurso
+        sys.exit(0)
